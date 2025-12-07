@@ -595,22 +595,26 @@ impl BeatKeeper {
                     if self.anlz_paths[i].value != path {
                         self.logger.debug(&format!("Deck {i} ANLZ file path changed: {path}"));
 
+                        // Stop watching the old DAT path before switching
                         self.watcher.unwatch(std::path::Path::new(&self.anlz_paths[i].value)).unwrap_or_else(|e| {
-                            self.logger.err(&format!("Deck {i}: Failed to watch path Failed to unwatch path {}: {}", &self.anlz_paths[i].value, e));
+                            self.logger.err(&format!("Deck {i}: Failed to unwatch path {}: {e}", &self.anlz_paths[i].value));
                         });
+                        // Stop watching the matching EXT path as well
                         self.watcher.unwatch(std::path::Path::new(&self.anlz_paths[i].value.replace(".DAT", ".EXT"))).unwrap_or_else(|e| {
-                            self.logger.err(&format!("Deck {i}: Failed to watch path Failed to unwatch path {}: {}", &self.anlz_paths[i].value.replace(".DAT", ".EXT"), e));
+                            self.logger.err(&format!("Deck {i}: Failed to unwatch path {}: {e}", &self.anlz_paths[i].value.replace(".DAT", ".EXT")));
                         });
                         self.anlz_paths[i].set(path);
+                        // Start watching the new DAT path
                         self.watcher.watch(std::path::Path::new(&self.anlz_paths[i].value), notify::RecursiveMode::NonRecursive).unwrap_or_else(|e| {
-                            self.logger.err(&format!("Deck {i}: Failed to watch path for{}: {}", &self.anlz_paths[i].value, e));
+                            self.logger.err(&format!("Deck {i}: Failed to watch path {}: {e}", &self.anlz_paths[i].value));
                         });
+                        // Start watching the new EXT path
                         self.watcher.watch(std::path::Path::new(&self.anlz_paths[i].value.replace(".DAT", ".EXT")), notify::RecursiveMode::NonRecursive).unwrap_or_else(|e| {
-                            self.logger.err(&format!("Deck {i}: Failed to watch path Failed to watch path {}: {}", &self.anlz_paths[i].value.replace(".DAT", ".EXT"), e));
+                            self.logger.err(&format!("Deck {i}: Failed to watch path {}: {e}", &self.anlz_paths[i].value.replace(".DAT", ".EXT")));
                         });
                     }
 
-                    // TODO watch out here, there's probably loads of things that can go wrong
+                    // Reparse ANLZ when the file changes or the path switches
                     let Ok(bytes) = std::fs::read(&self.anlz_paths[i].value) else {
                         self.logger.err(&format!("Failed to read anlz file for deck {i}: {}", &self.anlz_paths[i].value));
                         self.logger.err("If you are loading a new Tidal track for the first time, eject and load it again.");
@@ -658,6 +662,13 @@ impl BeatKeeper {
                             }
                             _ => (),
                         }
+                    }
+                }
+
+                // Heartbeat: always send the current ANLZ path once known
+                if !self.anlz_paths[i].value.is_empty() {
+                    for module in &mut self.running_modules {
+                        module.anlz_path_changed(&self.anlz_paths[i].value, i);
                     }
                 }
             }

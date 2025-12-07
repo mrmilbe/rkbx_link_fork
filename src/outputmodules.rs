@@ -27,6 +27,8 @@ pub trait OutputModule {
     fn track_changed(&mut self, _track: &TrackInfo, _deck: usize) {}
     fn track_changed_master(&mut self, _track: &TrackInfo) {}
 
+    fn anlz_path_changed(&mut self, _path: &str, _deck: usize) {} // Allow modules to receive ANLZ/EXT path updates per deck
+
     fn phrase_changed(&mut self, _phrase: &str, _deck: usize) {}
     fn phrase_changed_master(&mut self, _phrase: &str) {}
 
