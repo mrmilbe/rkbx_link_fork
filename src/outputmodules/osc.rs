@@ -36,7 +36,6 @@ struct MessageToggles{
     time_master: bool,
     phrase: bool,
     phrase_master: bool,
-    anlz_path: bool,
     phrase_output_format: OutputFormat,
 }
 
@@ -56,7 +55,6 @@ impl MessageToggles{
             time_master: conf.get_or_default("msg.time_master", true), 
             phrase: conf.get_or_default("msg.phrase", false), 
             phrase_master:  conf.get_or_default("msg.phrase_master", true),
-            anlz_path: conf.get_or_default("heartbeat.anlz_path", false), // Gate ANLZ/EXT path messages behind config flag
             phrase_output_format: {
                 let fmt = conf.get_or_default("phrase_output_format", "string".to_string());
                 match OutputFormat::from_str(&fmt) {
@@ -78,8 +76,6 @@ pub struct Osc {
     message_toggles: MessageToggles,
     send_period: i32,
     send_period_counter: i32,
-    deck_bpm_current: [Option<f32>; 4], // Cache per-deck BPM so we can resend it on slow_update heartbeats
-    heartbeat_bpm: bool, // Controls whether we resend BPM every heartbeat
 }
 
 
@@ -150,8 +146,6 @@ impl Osc {
             message_toggles: MessageToggles::new(&conf, logger),
             send_period: conf.get_or_default("send_every_nth", 2),
             send_period_counter: 0,
-            deck_bpm_current: [None; 4], // Start with empty BPM cache for all decks
-            heartbeat_bpm: conf.get_or_default("heartbeat.bpm", false), // Enable per-heartbeat BPM resends only when requested
         }))
     }
 }
@@ -170,10 +164,7 @@ impl OutputModule for Osc {
     }
 
     fn bpm_changed(&mut self, bpm: f32, deck: usize) {
-        if let Some(slot) = self.deck_bpm_current.get_mut(deck) {
-            *slot = Some(bpm); // Store latest BPM for this deck so we can replay it later
-        }
-        self.send_float(&format!("/bpm/{deck}/current"), bpm); // Emit per-deck current BPM immediately
+        self.send_float(&format!("/bpm/{deck}/current"), bpm);
     }
 
     fn beat_update_master(&mut self, beat: f32) {
@@ -243,9 +234,11 @@ impl OutputModule for Osc {
     }
 
     fn anlz_path_changed(&mut self, path: &str, deck: usize) {
-        if self.message_toggles.anlz_path {
-            self.send_string(&format!("/track/{deck}/anlz_path"), path); // Send ANLZ/EXT file path only when enabled in config
-        }
+        self.send_string(&format!("/track/{deck}/anlz_path"), path);
+    }
+
+    fn masterdeck_index_changed(&mut self, index: usize) {
+        self.send_int("/masterdeck/index", index as i32);
     }
 
     fn slow_update(&mut self) {
@@ -266,19 +259,6 @@ impl OutputModule for Osc {
             self.logger
                 .info(&format!("Sending {source_addr} -> {target_addr}"));
             }
-
-        if self.heartbeat_bpm {
-            // Optional: resend cached per-deck BPM values each slow_update so receivers stay in sync after drops
-            let mut resend_messages: Vec<(String, f32)> = Vec::new();
-            for (deck, bpm_opt) in self.deck_bpm_current.iter().enumerate() {
-                if let Some(bpm) = bpm_opt {
-                    resend_messages.push((format!("/bpm/{deck}/current"), *bpm));
-                }
-            }
-            for (addr, bpm) in resend_messages {
-                self.send_float(&addr, bpm);
-            }
-        }
     }
 
     fn phrase_changed_master(&mut self, phrase: &str) {

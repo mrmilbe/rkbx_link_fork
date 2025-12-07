@@ -63,8 +63,12 @@ osc.msg.beat.div_4 false
 osc.msg.time false
 osc.msg.phrase false
 
-osc.heartbeat.anlz_path false
-osc.heartbeat.bpm false
+keeper.heartbeat.anlz_path false
+keeper.heartbeat.masterdeck_index false
+keeper.heartbeat.bpm false
+keeper.heartbeat.original_bpm false
+keeper.heartbeat.track_info false
+keeper.heartbeat.phrase false
 
 # == Write current track to file ==
 file.enabled false

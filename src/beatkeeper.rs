@@ -273,6 +273,15 @@ pub struct BeatKeeper {
 
     td_trackers: Vec<TrackingDataTracker>,
     master_td_tracker: TrackingDataTracker,
+
+    // Heartbeat config - checked once at startup
+    needs_heartbeat: bool,
+    heartbeat_anlz_path: bool,
+    heartbeat_masterdeck_index: bool,
+    heartbeat_bpm: bool,
+    heartbeat_original_bpm: bool,
+    heartbeat_track_info: bool,
+    heartbeat_phrase: bool,
 }
 
 struct TrackingDataTracker {
@@ -339,6 +348,15 @@ impl BeatKeeper {
             }
         };
 
+        // Read heartbeat config once at startup
+        let heartbeat_anlz_path = keeper_config.get_or_default("heartbeat.anlz_path", false);
+        let heartbeat_masterdeck_index = keeper_config.get_or_default("heartbeat.masterdeck_index", false);
+        let heartbeat_bpm = keeper_config.get_or_default("heartbeat.bpm", false);
+        let heartbeat_original_bpm = keeper_config.get_or_default("heartbeat.original_bpm", false);
+        let heartbeat_track_info = keeper_config.get_or_default("heartbeat.track_info", false);
+        let heartbeat_phrase = keeper_config.get_or_default("heartbeat.phrase", false);
+        let needs_heartbeat = heartbeat_anlz_path || heartbeat_masterdeck_index || heartbeat_bpm || heartbeat_original_bpm || heartbeat_track_info || heartbeat_phrase;
+
         let mut keeper = BeatKeeper {
             masterdeck_index: ChangeTrackedValue::new(0),
             offset_samples: (keeper_config.get_or_default("delay_compensation", 0.) * 44100. / 1000.) as i64,
@@ -353,7 +371,14 @@ impl BeatKeeper {
             master_td_tracker: TrackingDataTracker::new(),
             anlz_paths: vec![ChangeTrackedValue::new("".to_string()); 4],
             watcher,
-            watcher_rx
+            watcher_rx,
+            needs_heartbeat,
+            heartbeat_anlz_path,
+            heartbeat_masterdeck_index,
+            heartbeat_bpm,
+            heartbeat_original_bpm,
+            heartbeat_track_info,
+            heartbeat_phrase,
         };
 
         let mut rekordbox = None;
@@ -664,14 +689,13 @@ impl BeatKeeper {
                         }
                     }
                 }
-
-                // Heartbeat: always send the current ANLZ path once known
-                if !self.anlz_paths[i].value.is_empty() {
-                    for module in &mut self.running_modules {
-                        module.anlz_path_changed(&self.anlz_paths[i].value, i);
-                    }
-                }
             }
+
+            // Heartbeat: periodic resends
+            if self.needs_heartbeat {
+                self.send_heartbeats();
+            }
+
             for module in &mut self.running_modules {
                 module.slow_update();
             }
@@ -687,6 +711,88 @@ impl BeatKeeper {
         }
 
         Ok(())
+    }
+
+    fn send_heartbeats(&mut self) {
+        // Heartbeat: resend ANLZ paths
+        if self.heartbeat_anlz_path {
+            for (i, anlz_path) in self.anlz_paths[0..self.decks].iter().enumerate() {
+                if !anlz_path.value.is_empty() {
+                    for module in &mut self.running_modules {
+                        module.anlz_path_changed(&anlz_path.value, i);
+                    }
+                }
+            }
+        }
+
+        // Heartbeat: resend master deck index
+        if self.heartbeat_masterdeck_index {
+            for module in &mut self.running_modules {
+                module.masterdeck_index_changed(self.masterdeck_index.value);
+            }
+        }
+
+        // Heartbeat: resend BPM and original BPM
+        if self.heartbeat_bpm || self.heartbeat_original_bpm {
+            for (i, td_tracker) in self.td_trackers[0..self.decks].iter().enumerate() {
+                let is_master = i == self.masterdeck_index.value;
+                if is_master || self.keep_warm {
+                    for module in &mut self.running_modules {
+                        if self.heartbeat_bpm {
+                            module.bpm_changed(td_tracker.bpm_changed.value, i);
+                        }
+                        if self.heartbeat_original_bpm {
+                            module.original_bpm_changed(td_tracker.original_bpm_changed.value, i);
+                        }
+                    }
+                }
+            }
+            
+            for module in &mut self.running_modules {
+                if self.heartbeat_bpm {
+                    module.bpm_changed_master(self.master_td_tracker.bpm_changed.value);
+                }
+                if self.heartbeat_original_bpm {
+                    module.original_bpm_changed_master(self.master_td_tracker.original_bpm_changed.value);
+                }
+            }
+        }
+
+        // Heartbeat: resend track info
+        if self.heartbeat_track_info {
+            for (i, track_info) in self.track_infos[0..self.decks].iter().enumerate() {
+                let is_master = i == self.masterdeck_index.value;
+                if is_master || self.keep_warm {
+                    for module in &mut self.running_modules {
+                        module.track_changed(&track_info.value, i);
+                    }
+                }
+            }
+            
+            for module in &mut self.running_modules {
+                module.track_changed_master(&self.track_infos[self.masterdeck_index.value].value);
+            }
+        }
+
+        // Heartbeat: resend phrase info
+        if self.heartbeat_phrase {
+            for (i, td_tracker) in self.td_trackers[0..self.decks].iter().enumerate() {
+                let is_master = i == self.masterdeck_index.value;
+                if is_master || self.keep_warm {
+                    for module in &mut self.running_modules {
+                        module.phrase_changed(&td_tracker.phrase.value, i);
+                        module.next_phrase_changed(&td_tracker.next_phrase.value, i);
+                        module.next_phrase_in(td_tracker.next_phrase_in.value, i);
+                    }
+                }
+            }
+            
+            for module in &mut self.running_modules {
+                module.phrase_changed_master(&self.master_td_tracker.phrase.value);
+                module.next_phrase_changed_master(&self.master_td_tracker.next_phrase.value);
+                module.next_phrase_in_master(self.master_td_tracker.next_phrase_in.value);
+            }
+        }
     }
 }
 
