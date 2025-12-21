@@ -28,14 +28,14 @@ keeper.keep_warm true
 keeper.decks 2
 
 # Resend the enabled values every very slow update
-keeper.heartbeat.anlz_path true
-keeper.heartbeat.masterdeck_index true
-keeper.heartbeat.bpm true
-keeper.heartbeat.original_bpm true
-keeper.heartbeat.time true
-keeper.heartbeat.beat true
-keeper.heartbeat.track_info true
-keeper.heartbeat.phrase true
+keeper.heartbeat.anlz_path false
+keeper.heartbeat.masterdeck_index false
+keeper.heartbeat.bpm false
+keeper.heartbeat.original_bpm false
+keeper.heartbeat.time false
+keeper.heartbeat.beat false
+keeper.heartbeat.track_info false
+keeper.heartbeat.phrase false
 
 
 
