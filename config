@@ -17,6 +17,8 @@ keeper.rekordbox_version 7.2.2
 keeper.update_rate 120
 # Every nth update, perform a slow update
 keeper.slow_update_every_nth 10
+# Every nth update, perform a very slow update (send heartbeats)
+keeper.very_slow_update_every_nth 1200
 # Delay compensation in ms
 # Positive values advance the output
 keeper.delay_compensation 0
@@ -24,6 +26,17 @@ keeper.delay_compensation 0
 keeper.keep_warm true
 # Number of active decks
 keeper.decks 2
+
+# Resend the enabled values every very slow update
+keeper.heartbeat.anlz_path true
+keeper.heartbeat.masterdeck_index true
+keeper.heartbeat.bpm true
+keeper.heartbeat.original_bpm true
+keeper.heartbeat.time true
+keeper.heartbeat.beat true
+keeper.heartbeat.track_info true
+keeper.heartbeat.phrase true
+
 
 
 # == Ableton Link ==
@@ -62,13 +75,6 @@ osc.msg.beat.div_2 false
 osc.msg.beat.div_4 false
 osc.msg.time false
 osc.msg.phrase false
-
-keeper.heartbeat.anlz_path false
-keeper.heartbeat.masterdeck_index false
-keeper.heartbeat.bpm false
-keeper.heartbeat.original_bpm false
-keeper.heartbeat.track_info false
-keeper.heartbeat.phrase false
 
 # == Write current track to file ==
 file.enabled false

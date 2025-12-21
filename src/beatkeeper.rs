@@ -253,6 +253,18 @@ impl<T: std::cmp::PartialEq> ChangeTrackedValue<T> {
     }
 }
 
+struct HeartbeatConfig {
+    bpm: bool,
+    original_bpm: bool,
+    beat: bool,
+    pos: bool,
+    phrase: bool,
+    anlz_path: bool,
+    masterdeck_index: bool,
+    track_info: bool,
+
+}
+
 pub struct BeatKeeper {
     masterdeck_index: ChangeTrackedValue<usize>,
     offset_samples: i64,
@@ -274,14 +286,8 @@ pub struct BeatKeeper {
     td_trackers: Vec<TrackingDataTracker>,
     master_td_tracker: TrackingDataTracker,
 
-    // Heartbeat config - checked once at startup
-    needs_heartbeat: bool,
-    heartbeat_anlz_path: bool,
-    heartbeat_masterdeck_index: bool,
-    heartbeat_bpm: bool,
-    heartbeat_original_bpm: bool,
-    heartbeat_track_info: bool,
-    heartbeat_phrase: bool,
+    hearbeat_config: HeartbeatConfig,
+    very_slow_update_flag: bool,
 }
 
 struct TrackingDataTracker {
@@ -318,6 +324,7 @@ impl BeatKeeper {
         let keeper_config = config.reduce_to_namespace("keeper");
         let update_rate = keeper_config.get_or_default("update_rate", 50);
         let slow_update_denominator = keeper_config.get_or_default("slow_update_every_nth", 50);
+        let very_slow_update_denominator = keeper_config.get_or_default("very_slow_update_every_nth", 1200);
 
         let mut running_modules = vec![];
 
@@ -349,13 +356,6 @@ impl BeatKeeper {
         };
 
         // Read heartbeat config once at startup
-        let heartbeat_anlz_path = keeper_config.get_or_default("heartbeat.anlz_path", false);
-        let heartbeat_masterdeck_index = keeper_config.get_or_default("heartbeat.masterdeck_index", false);
-        let heartbeat_bpm = keeper_config.get_or_default("heartbeat.bpm", false);
-        let heartbeat_original_bpm = keeper_config.get_or_default("heartbeat.original_bpm", false);
-        let heartbeat_track_info = keeper_config.get_or_default("heartbeat.track_info", false);
-        let heartbeat_phrase = keeper_config.get_or_default("heartbeat.phrase", false);
-        let needs_heartbeat = heartbeat_anlz_path || heartbeat_masterdeck_index || heartbeat_bpm || heartbeat_original_bpm || heartbeat_track_info || heartbeat_phrase;
 
         let mut keeper = BeatKeeper {
             masterdeck_index: ChangeTrackedValue::new(0),
@@ -372,13 +372,17 @@ impl BeatKeeper {
             anlz_paths: vec![ChangeTrackedValue::new("".to_string()); 4],
             watcher,
             watcher_rx,
-            needs_heartbeat,
-            heartbeat_anlz_path,
-            heartbeat_masterdeck_index,
-            heartbeat_bpm,
-            heartbeat_original_bpm,
-            heartbeat_track_info,
-            heartbeat_phrase,
+            hearbeat_config: HeartbeatConfig {
+                beat: keeper_config.get_or_default("heartbeat.beat", false),
+                pos: keeper_config.get_or_default("heartbeat.time", false),
+                anlz_path: keeper_config.get_or_default("heartbeat.anlz_path", false),
+                masterdeck_index: keeper_config.get_or_default("heartbeat.masterdeck_index", false),
+                bpm: keeper_config.get_or_default("heartbeat.bpm", false),
+                original_bpm: keeper_config.get_or_default("heartbeat.original_bpm", false),
+                track_info: keeper_config.get_or_default("heartbeat.track_info", false),
+                phrase: keeper_config.get_or_default("heartbeat.phrase", false),
+            },
+            very_slow_update_flag: false,
         };
 
         let mut rekordbox = None;
@@ -392,7 +396,7 @@ impl BeatKeeper {
         loop {
             if let Some(rb) = &rekordbox {
                 let update_start_time = std::time::Instant::now();
-                if let Err(e) = keeper.update(rb, n == 0) {
+                if let Err(e) = keeper.update(rb, n % slow_update_denominator == 0, n % very_slow_update_denominator == 0) {
                     keeper.report_error(e);
 
                     rekordbox = None;
@@ -400,7 +404,7 @@ impl BeatKeeper {
                     logger.info("Reconnecting in 3s...");
                     thread::sleep(Duration::from_secs(3));
                 } else {
-                    n = (n + 1) % slow_update_denominator;
+                    n += 1;
                     let elapsed = update_start_time.elapsed();
                     if period > elapsed {
                         thread::sleep(period - elapsed);
@@ -468,14 +472,16 @@ impl BeatKeeper {
         &mut self,
         rb: &Rekordbox,
         slow_update: bool,
+        very_slow_update: bool,
     ) -> Result<(), ReadError> {
-        // let masterdeck_index_changed = self.masterdeck_index.set(td.masterdeck_index as usize);
         let masterdeck_index_changed = self.masterdeck_index.set(rb.read_masterdeck_index()?);
         if self.masterdeck_index.value >= rb.deckcount {
             return Ok(()); // No master deck selected - rekordbox is not initialised
         }
 
-        // let mut tracker_data = None;
+        if very_slow_update {
+            self.very_slow_update_flag = true;
+        }
 
         for module in &mut self.running_modules {
             module.pre_update();
@@ -483,8 +489,8 @@ impl BeatKeeper {
 
         for (i, (tracker, td_tracker)) in (self.track_trackers[0..self.decks])
             .iter_mut()
-            .zip(self.td_trackers[0..self.decks].iter_mut())
-            .enumerate()
+                .zip(self.td_trackers[0..self.decks].iter_mut())
+                .enumerate()
         {
             let is_master = i == self.masterdeck_index.value;
             if is_master | self.keep_warm {
@@ -494,13 +500,14 @@ impl BeatKeeper {
                     continue;
                 };
 
-                let bpm_changed = td_tracker.bpm_changed.set(res.timing_data_raw.current_bpm);
-                let original_bpm_changed = td_tracker.original_bpm_changed.set(res.original_bpm);
-                let beat_changed = td_tracker.beat_changed.set(res.beat);
-                let pos_changed = td_tracker.pos_changed.set(res.timing_data_raw.sample_position);
-                let phrase_changed = td_tracker.phrase.set(res.phrase.clone());
-                let next_phrase_changed = td_tracker.next_phrase.set(res.next_phrase.clone());
-                let next_phrase_in_changed = td_tracker.next_phrase_in.set(res.next_phrase_in);
+                let bpm_changed = td_tracker.bpm_changed.set(res.timing_data_raw.current_bpm) || very_slow_update && self.hearbeat_config.bpm;
+                let original_bpm_changed = td_tracker.original_bpm_changed.set(res.original_bpm) || very_slow_update && self.hearbeat_config.original_bpm;
+                let beat_changed = td_tracker.beat_changed.set(res.beat) || very_slow_update && self.hearbeat_config.beat;
+                let pos_changed = td_tracker.pos_changed.set(res.timing_data_raw.sample_position) || very_slow_update && self.hearbeat_config.pos;
+                // These clones could be optimised out
+                let phrase_changed = td_tracker.phrase.set(res.phrase.clone()) || very_slow_update && self.hearbeat_config.phrase;
+                let next_phrase_changed = td_tracker.next_phrase.set(res.next_phrase.clone()) || very_slow_update && self.hearbeat_config.phrase;
+                let next_phrase_in_changed = td_tracker.next_phrase_in.set(res.next_phrase_in) || very_slow_update && self.hearbeat_config.phrase;
 
                 for module in &mut self.running_modules {
                     if beat_changed {
@@ -530,28 +537,28 @@ impl BeatKeeper {
                     let bpm_changed = self
                         .master_td_tracker
                         .bpm_changed
-                        .set(res.timing_data_raw.current_bpm);
+                        .set(res.timing_data_raw.current_bpm) || very_slow_update && self.hearbeat_config.bpm;
                     let original_bpm_changed = self
                         .master_td_tracker
                         .original_bpm_changed
-                        .set(res.original_bpm);
-                    let beat_changed = self.master_td_tracker.beat_changed.set(res.beat);
+                        .set(res.original_bpm) || very_slow_update && self.hearbeat_config.original_bpm;
+                    let beat_changed = self.master_td_tracker.beat_changed.set(res.beat) || very_slow_update && self.hearbeat_config.beat;
                     let pos_changed = self
                         .master_td_tracker
                         .pos_changed
-                        .set(res.timing_data_raw.sample_position);
+                        .set(res.timing_data_raw.sample_position) || very_slow_update && self.hearbeat_config.pos;
                     let phrase_changed = self
                         .master_td_tracker
                         .phrase
-                        .set(res.phrase);
+                        .set(res.phrase) || very_slow_update && self.hearbeat_config.phrase;
                     let next_phrase_changed = self
                         .master_td_tracker
                         .next_phrase
-                        .set(res.next_phrase);
+                        .set(res.next_phrase) || very_slow_update && self.hearbeat_config.phrase;
                     let next_phrase_in_changed = self
                         .master_td_tracker
                         .next_phrase_in
-                        .set(res.next_phrase_in);
+                        .set(res.next_phrase_in) || very_slow_update && self.hearbeat_config.phrase;
 
 
                     for module in &mut self.running_modules {
@@ -587,17 +594,18 @@ impl BeatKeeper {
         let mut masterdeck_track_changed = false;
 
         if slow_update {
+            // Send update for track info changes (title/artist/album)
             for (i, track) in rb.get_track_infos()?.into_iter().enumerate() {
-                if self.track_infos[i].set(track) {
+                if self.track_infos[i].set(track) || self.very_slow_update_flag && self.hearbeat_config.track_info {
                     for module in &mut self.running_modules {
                         module.track_changed(&self.track_infos[i].value, i);
                     }
-                    self.track_trackers[i].track_changed = true;
                     masterdeck_track_changed |= self.masterdeck_index.value == i;
                 }
             }
 
 
+            // Check if the ANLZ file path has changed
             let mut anlz_file_updates = [false; 4];
             while let Ok(u) = self.watcher_rx.try_recv(){
                 match u {
@@ -616,6 +624,14 @@ impl BeatKeeper {
             }
 
             for (i, path) in rb.get_anlz_paths()?.into_iter().enumerate() {
+                // Send ANLZ path update if path has changed or heartbeat requests it
+                if self.anlz_paths[i].value != path || self.very_slow_update_flag && self.hearbeat_config.anlz_path {
+                    for module in &mut self.running_modules {
+                        module.anlz_path_changed(&path, i);
+                    }
+                }
+
+                // If the needed file itself has ACTUALLY changed, reload the ANLZ file
                 if self.anlz_paths[i].value != path || anlz_file_updates[i] {
                     if self.anlz_paths[i].value != path {
                         self.logger.debug(&format!("Deck {i} ANLZ file path changed: {path}"));
@@ -624,7 +640,7 @@ impl BeatKeeper {
                         self.watcher.unwatch(std::path::Path::new(&self.anlz_paths[i].value)).unwrap_or_else(|e| {
                             self.logger.err(&format!("Deck {i}: Failed to unwatch path {}: {e}", &self.anlz_paths[i].value));
                         });
-                        // Stop watching the matching EXT path as well
+                        // Stop watching the old EXT path
                         self.watcher.unwatch(std::path::Path::new(&self.anlz_paths[i].value.replace(".DAT", ".EXT"))).unwrap_or_else(|e| {
                             self.logger.err(&format!("Deck {i}: Failed to unwatch path {}: {e}", &self.anlz_paths[i].value.replace(".DAT", ".EXT")));
                         });
@@ -691,108 +707,31 @@ impl BeatKeeper {
                 }
             }
 
-            // Heartbeat: periodic resends
-            if self.needs_heartbeat {
-                self.send_heartbeats();
-            }
-
             for module in &mut self.running_modules {
                 module.slow_update();
             }
+
+            self.very_slow_update_flag = false;
         }
 
+        // Send update if masterdeck index changed or heartbeat
+        if masterdeck_index_changed || very_slow_update && self.hearbeat_config.masterdeck_index {
+            for module in &mut self.running_modules {
+                module.masterdeck_index_changed(self.masterdeck_index.value);
+            }
+        }
+
+        // Trigger master track change if track has actually changed
         if masterdeck_index_changed || masterdeck_track_changed {
             let track = &self.track_infos[self.masterdeck_index.value].value;
-            self.logger
-                .debug(&format!("Master track changed: {track:?}"));
+            // self.logger
+            //     .debug(&format!("Master track changed: {track:?}"));
             for module in &mut self.running_modules {
                 module.track_changed_master(track);
             }
         }
 
         Ok(())
-    }
-
-    fn send_heartbeats(&mut self) {
-        // Heartbeat: resend ANLZ paths
-        if self.heartbeat_anlz_path {
-            for (i, anlz_path) in self.anlz_paths[0..self.decks].iter().enumerate() {
-                if !anlz_path.value.is_empty() {
-                    for module in &mut self.running_modules {
-                        module.anlz_path_changed(&anlz_path.value, i);
-                    }
-                }
-            }
-        }
-
-        // Heartbeat: resend master deck index
-        if self.heartbeat_masterdeck_index {
-            for module in &mut self.running_modules {
-                module.masterdeck_index_changed(self.masterdeck_index.value);
-            }
-        }
-
-        // Heartbeat: resend BPM and original BPM
-        if self.heartbeat_bpm || self.heartbeat_original_bpm {
-            for (i, td_tracker) in self.td_trackers[0..self.decks].iter().enumerate() {
-                let is_master = i == self.masterdeck_index.value;
-                if is_master || self.keep_warm {
-                    for module in &mut self.running_modules {
-                        if self.heartbeat_bpm {
-                            module.bpm_changed(td_tracker.bpm_changed.value, i);
-                        }
-                        if self.heartbeat_original_bpm {
-                            module.original_bpm_changed(td_tracker.original_bpm_changed.value, i);
-                        }
-                    }
-                }
-            }
-            
-            for module in &mut self.running_modules {
-                if self.heartbeat_bpm {
-                    module.bpm_changed_master(self.master_td_tracker.bpm_changed.value);
-                }
-                if self.heartbeat_original_bpm {
-                    module.original_bpm_changed_master(self.master_td_tracker.original_bpm_changed.value);
-                }
-            }
-        }
-
-        // Heartbeat: resend track info
-        if self.heartbeat_track_info {
-            for (i, track_info) in self.track_infos[0..self.decks].iter().enumerate() {
-                let is_master = i == self.masterdeck_index.value;
-                if is_master || self.keep_warm {
-                    for module in &mut self.running_modules {
-                        module.track_changed(&track_info.value, i);
-                    }
-                }
-            }
-            
-            for module in &mut self.running_modules {
-                module.track_changed_master(&self.track_infos[self.masterdeck_index.value].value);
-            }
-        }
-
-        // Heartbeat: resend phrase info
-        if self.heartbeat_phrase {
-            for (i, td_tracker) in self.td_trackers[0..self.decks].iter().enumerate() {
-                let is_master = i == self.masterdeck_index.value;
-                if is_master || self.keep_warm {
-                    for module in &mut self.running_modules {
-                        module.phrase_changed(&td_tracker.phrase.value, i);
-                        module.next_phrase_changed(&td_tracker.next_phrase.value, i);
-                        module.next_phrase_in(td_tracker.next_phrase_in.value, i);
-                    }
-                }
-            }
-            
-            for module in &mut self.running_modules {
-                module.phrase_changed_master(&self.master_td_tracker.phrase.value);
-                module.next_phrase_changed_master(&self.master_td_tracker.next_phrase.value);
-                module.next_phrase_in_master(self.master_td_tracker.next_phrase_in.value);
-            }
-        }
     }
 }
 
@@ -806,7 +745,6 @@ struct TrackTrackerResult {
 }
 
 struct TrackTracker {
-    track_changed: bool, // External flag to indicate that the track has changed
     beatgrid: Option<BeatGrid>,
     songstructure: Option<rekordcrate::anlz::SongStructureData>,
 }
@@ -814,7 +752,6 @@ struct TrackTracker {
 impl TrackTracker {
     fn new() -> Self {
         Self {
-            track_changed: false,
             beatgrid: None,
             songstructure: None,
         }
@@ -831,7 +768,7 @@ impl TrackTracker {
             td.current_bpm = 120.0;
         }
 
-        
+
 
         let mut beat = 0.0;
         let mut original_bpm = 120.0;
